@@ -3,5 +3,8 @@
 .Rdata
 .httr-oauth
 .DS_Store
+*.Rds
+*.rds
+*.Rdata
 *.csv
 *.yml
