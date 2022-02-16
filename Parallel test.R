@@ -9,3 +9,4 @@ library(multidplyr) # parallel processing
 ##I don't like seeing scientific notations in my results
 options(scipen = 999)
 
+newdata <- data.frame(a = "1")
