@@ -12,3 +12,6 @@
 *.xlsx
 *.xls
 *.txt
+*.feather
+/df.large
+df.large/
