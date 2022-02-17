@@ -7,4 +7,11 @@
 *.rds
 *.Rdata
 *.csv
+*.sas7bdat
 *.yml
+*.xlsx
+*.xls
+*.txt
+*.feather
+/df.large
+df.large/
