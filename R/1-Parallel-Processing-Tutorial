@@ -1,0 +1,769 @@
+---
+TITLE: Parallel Computation and Processing in R
+AUTHOR: Fan Xiong, Washington Prescription Monitoring Program
+DATA SOURCE: A large randomly generated dataset.
+IMPORTANT NOTE: This R script uses a generated dataset to demonstrate parallelism.
+  There are some gains from parallelism when working with large datasets. It may use
+  more than 32GB RAM. You can make the generated dataset smaller in order to run the
+  example on your workstation.
+---
+
+# Parallel Computation and Processing in R
+
+## What is Parallel Processing
+
+-   Imagine that you have a series of tasks to run (e.g., code chunks, repetitive loops, functions, etc): task1, task2, task3, etc.
+
+-   Assuming each task does not depend on the results of a previous task. Serial processing means each task is completed one at a time task1, task2, task3, etc.
+
+-   Parallel processing means that all tasks start simultaneously and complete on their own.
+
+-   Parallel processing, usually, should be faster.
+
+-   Parallel processing may also be referred to as asynchronous processing, multiprocessing, etc.
+
+## What can you *paralyze-lized*?
+
+The number of tasks you can run in parallel will depend on CPU and RAM:
+
+-   CPUs -- this is the number of logical processors on your workstation running the tasks.
+    -   Open Command Prompt WMIC CPU Get DeviceID,NumberOfCores,NumberOfLogicalProcessors
+-   RAM -- this is the total number of memory available to run your task in R.
+    -   Parallel processing will objects from your local R environment to asynchronous R sessions.
+    -   Be mindful of large R objects.
+
+Below is a typical work flow you might do in R.
+
+[![Typical Parallel Processing Workflow](typical-parallel-processing-workflow.JPG)](https://nceas.github.io/oss-lessons/parallel-computing-in-r/parallel-computing-in-r.html)
+
+## How to **Para-serial-lyzed** Your Work:
+
+1.  Prepare your data in the local environment. This could involve cleaning, subsetting, or segmenting the data into chunks that can be processed in parallel.
+
+2.  Use functions like makeCluster() from the `parallel` package to create a cluster of multiple cores or nodes. You have other options with `doParallel` and `furrr`.
+
+3.  Distribute the data across the nodes in the cluster. This might involve splitting the data into chunks and sending each chunk to a different node.
+
+4.  Apply a parallel foreach loop or similar construct to process the data in parallel across the nodes. Each node works on its portion of the data independently.
+
+5.  After processing, gather the results from all nodes. Combine these results into a single data frame or object for further analysis or storage.
+
+6.  Once the processing is complete, shut down the cluster using stopCluster() to release the resources.
+
+7.  Perform any necessary post-processing on the combined results. This might include additional analysis, visualization, or exporting the data.
+
+## Important Note:
+
+Some packages in R already have implicit parallelism built in to them. These are packages like data.table and caret. We will use examples of loading and manipulating data to show how parallelism (aka running R asynchronously) works. On Windows platform, parallelism involves usually setting up 'clusters' and exporting what you need to them. We will not be covering how to use multiple machines to do parallel tasks, since I don't have an environment for that.
+
+# Paralyze-lized Tutorial
+
+## 1. Problem to Solve
+
+We have a large dataset (\~2.5GB) that will be split into smaller chunks. These chunks will need to be combined and then analyzed. Alternatively, we may want to analyze it using multiple cores as well. This is a problem created for the purpose of this tutorial. There may be other more optimal ways to do these tasks.
+
+## 2. R Parallel Processing Packages
+
+We will use these packages for this tutorial/training. You have many different options depending on your programming style/preference.
+
+```{r include=FALSE}
+library(tidyverse) # ggplot2, purrr, dplyr, tidyr, readr, tibble
+library(vroom) # reading csv files fast with implicit parallelism
+library(parallel) # parallel processing & backend for doParallel
+library(doParallel) # parallel processing (foreach loops)
+library(furrr) # parallel implementation of purrr 
+library(future) # backend for furrr
+library(multidplyr) # parallel processing
+
+##I don't like seeing scientific notations in my results
+options(scipen = 999)
+```
+
+## 3. Generate Data
+
+Let's create a random dataset to demonstrate when parallelism might be useful. Remember there is always an overhead cost to move data on to clusters, so not all tasks or problems may benefit from parallelism.
+
+```{r echo=FALSE}
+##Generate a random data
+
+##change this number to a smaller number if you don't have 32GB RAM.
+size <- 3500000
+
+##the number of cores is the number of partitions for the data files
+cores <- 10
+
+set.seed(7)
+df <- data.frame( 
+  split_by   = factor(rep(1:cores, each = size)),
+  strata     = factor(rep(1:cores, each = size)),
+  factors     = factor(rep(1:5, each = size)),
+  price    = runif(size, min = -10, max = 125),
+  y     = runif(size, min = 0, max = 2500),
+  z     = runif(size, min = -10, max = 25),
+  x        = runif(size, min = 0, max = 5000)
+) %>%
+  tibble::rowid_to_column("rowid")
+
+object.size(df)
+paste0(object.size(df)/1000000000," GB")
+
+```
+
+## 4. Split Data Up into Files
+
+Split the data by year into a separate folder for this tutorial with `parallel` packages.
+
+```{r include=FALSE}
+## Export Data into a Folder
+dir.create(paste0(getwd(),"/Random Data"))
+
+#Split the Data and Write them as csv files
+split_task <- 
+  df %>% 
+  dplyr::group_by(split_by) %>% 
+  ##use group_walk to apply function to a group
+  dplyr::group_walk(~vroom::vroom_write(.x, 
+                                  path = paste0(getwd(),"/Random Data/randomset",.y$split_by, '.csv'), 
+                                  delim = ",",
+                                  col_names = T,
+                                  append = F,
+                                  num_threads = parallel::detectCores()))
+rm(split_task,df)
+gc()
+```
+
+## 5. Load Data into R Sequentially
+
+If we didn't want to use parallel processing, we can use very simple csv file readers. Below are some options to import and transform data.
+
+```{r echo=TRUE}
+#Get a list of all the files to import
+files <- dir(paste0(getwd(),"/Random Data"),pattern = "csv", full.names = T)
+
+#Using readr and dplyr (sequential or serial processing)
+system.time(readr <-
+              purrr::map_dfr(files, function(f) {
+                readr::read_csv(
+                  f,
+                  col_types = readr::cols(
+                    rowid = readr::col_double(),
+                    strata = readr::col_character(),
+                    factors = readr::col_character(),
+                    price = readr::col_double(),
+                    y = readr::col_double(),
+                    z = readr::col_double(),
+                    x = readr::col_double()
+                  )
+                ) %>% 
+                  dplyr::group_by(strata,factors) %>%
+                  dplyr::summarise_if(is.numeric,mean, na.rm = T)
+              }))
+readr
+
+#Using vroom (really fast at reading files )
+system.time(
+  vroom <-
+    vroom::vroom(
+      files,
+      num_threads = parallel::detectCores(),
+      col_types = c(
+        rowid = readr::col_double(),
+        strata = readr::col_character(),
+        factors = readr::col_character(),
+        price = readr::col_double(),
+        y = readr::col_double(),
+        z = readr::col_double(),
+        x = readr::col_double()
+      )
+    ) %>% 
+    dplyr::group_by(strata,factors) %>%
+    dplyr::summarise_if(is.numeric,mean, na.rm = T)
+)
+vroom
+
+##Free up memory
+rm(readr,vroom)
+gc()
+```
+
+## 6. Parallel Processing
+
+### 6.1 Using `parallel` package
+
+Let's start by checking how many cores (CPUS) our workstation has to use for parallel processing.
+
+```{r include=FALSE}
+cores <- parallel::detectCores()
+cores
+```
+
+Create a cluster/node/worker by specifying how many cores (CPUS) you want to use. Depending on the size of the problem (data) you may want to increase/decrease the number of cores. Be careful about committing too many CPUs since the local environment will be copied to each cluster/node/worker.
+
+```{r include=FALSE}
+cl <- parallel::makeCluster(10)
+```
+
+Load R packages and Export the list of files to each cluster.
+
+```{r include=FALSE}
+parallel::clusterEvalQ(cl = cl,  {
+  ## set up each cluster/node/worker
+  library(vroom)
+  library(tidyverse)})
+#Get a list of all the files to import
+files <- dir(paste0(getwd(),"/Random Data"),pattern = "csv", full.names = T)
+
+parallel::clusterExport(cl = cl, c("files"))
+```
+
+Use `parLapply` to process all 10 blocks of data. parLapply works like lapply and returns the result as a list. Other options include `parApply`,`parSapply`, `clusterApply`, and others. We will use readr to see if we can speed that up.
+
+```{r echo=TRUE}
+
+system.time(readr.parallel <-
+              parallel::parLapply(cl, files, function(f) {
+                readr::read_csv(
+                  f,
+                  col_types = readr::cols(
+                    rowid = readr::col_double(),
+                    strata = readr::col_character(),
+                    factors = readr::col_character(),
+                    price = readr::col_double(),
+                    y = readr::col_double(),
+                    z = readr::col_double(),
+                    x = readr::col_double()
+                  )
+                ) %>% 
+                  dplyr::group_by(strata,factors) %>%
+                  dplyr::summarise_if(is.numeric,mean, na.rm = T)
+              }))
+
+##append results
+system.time(readr.parallel <- do.call("rbind",readr.parallel))
+readr.parallel
+
+##Free up memory
+rm(readr.parallel)
+gc()
+```
+
+Close cluster.
+
+```{r include=FALSE}
+parallel::stopCluster(cl)
+rm(cl)
+gc()
+```
+
+### 6.2 Using `doParallel` package
+
+You can also complete the same task via a parallel `foreach` loop.
+
+Start the clusters to use in the `foreach` loop. You can pass a cluster into the argument or specify the number of cores. You initiate a parallel foreach loop using `%dopar%`.
+
+```{r include=FALSE}
+
+#Get a list of all the files to import
+files <- dir(paste0(getwd(),"/Random Data"),pattern = "csv", full.names = T)
+
+##Create the clusters after setting up your local environment
+doParallel::registerDoParallel(cores = 10)
+```
+
+Using `foreach` with a few arguments to streamline the process a bit.
+
+```{r echo=TRUE}
+system.time(
+  readr.doParallel <- foreach::foreach(
+    i = 1:length(files),
+    .combine = "rbind",
+    .packages = c("tidyverse"),
+    .export = c("files"),
+    .errorhandling = c("pass")
+  ) %dopar% {
+    readr.doParallel <- readr::read_csv(
+      files[i],
+      col_types = readr::cols(
+        rowid = readr::col_double(),
+        strata = readr::col_character(),
+        factors = readr::col_character(),
+        price = readr::col_double(),
+        y = readr::col_double(),
+        z = readr::col_double(),
+        x = readr::col_double()
+      )
+    ) %>% 
+      dplyr::group_by(strata,factors) %>%
+      dplyr::summarise_if(is.numeric,mean, na.rm = T)
+    readr.doParallel
+  }
+)
+
+readr.doParallel
+
+
+##Free up memory
+rm(readr.doParallel)
+gc()
+
+```
+
+You can stop the clusters after the task is finished.
+
+```{r include=FALSE}
+doParallel::stopImplicitCluster()
+gc()
+```
+
+### 6.3 Using `furrr` package
+
+furrr is a parallel implementation of purrr. It offers the same purrr flexibility via futures package. With plan you can specify the following: sequential (no parallel processing), multisession (parallel processing via sockets), or multicore (parallel processing via forking). You can also change the default number of cores to use by using `future::tweak`.
+
+Register a future cluster with the plan package.
+
+```{r include=FALSE}
+#future::plan("multisession")
+##Set the options to allow more than the default size of object to be exported.
+options(future.globals.maxSize= 12000*1024^2 )
+
+##Create clusters
+future::plan(list(future::tweak(future::multisession, workers = 10)))
+future::nbrOfWorkers()
+
+#Get a list of all the files to import
+files <- dir(paste0(getwd(),"/Random Data"),pattern = "csv", full.names = T)
+
+```
+
+We will use `future_map_dfr`, which is the future version of `map_dfr` to unzip, import, and combine the data by row.
+
+```{r echo=TRUE}
+system.time(readr.furrr <- furrr::future_map_dfr(files, function(f) {
+  readr::read_csv(
+    f,
+    col_types = readr::cols(
+      rowid = readr::col_double(),
+      strata = readr::col_character(),
+      factors = readr::col_character(),
+      price = readr::col_double(),
+      y = readr::col_double(),
+      z = readr::col_double(),
+      x = readr::col_double()
+    )
+  ) %>%
+    dplyr::group_by(strata, factors) %>%
+    dplyr::summarise_if(is.numeric, mean, na.rm = T)
+              }))
+readr.furrr
+```
+
+You close the future cluster by specifying sequential.
+
+```{r echo=FALSE}
+##Close Clusters
+future::plan(strategy = "sequential")
+future::nbrOfWorkers()
+rm(readr.furrr,files)
+gc()
+```
+
+### 6.4 Using `multidplyr` package
+
+#### 6.4.1 Option 1 with `multidplyr`: Loading from R to Clusters
+
+Now that we know about options to run R code in parallel and how to split data across multiple cores. What if we have data that doesn't have defined groups but we still want to use multidplyr? This works IF AND ONLY IF the data manipulation can be completed in a distributed-like processing (each record doesn't depend on the results of another record). For summary-type of task, make sure each group desired is in the same group before partition.
+
+```{r echo=TRUE}
+df <- vroom::vroom(
+  dir(
+    paste0(getwd(), "/Random Data"),
+    pattern = "csv",
+    full.names = T
+  ),
+  num_threads = parallel::detectCores(),
+  col_types = c(
+    rowid = readr::col_double(),
+    strata = readr::col_character(),
+    factors = readr::col_character(),
+    price = readr::col_double(),
+    y = readr::col_double(),
+    z = readr::col_double(),
+    x = readr::col_double()
+  )
+)
+
+##The number of partitions we will create
+partitions <- 10
+
+##Create a column to group the data randomly by
+split_by <- sample(1:partitions,
+                   size = nrow(df),
+                   replace = T)
+
+df <- dplyr::bind_cols(df, tibble(split_by))
+colnames(df)
+
+##We can only group and partition on factors so it seems.
+df$split_by <- as.factor(df$split_by)
+
+##How many records will go into each cluster?
+table(df$split_by)
+
+##start clusters with desired number of partitions
+system.time(cluster <- multidplyr::new_cluster(partitions))
+
+##load packages to clusters
+system.time(multidplyr::cluster_library(cluster, c("tidyverse", "stats")))
+
+##create a custom function
+manipulate_function <- function(var) {
+  var <- ifelse(var > 10, 1, 0)
+}
+
+##send custom function to clusters
+system.time(multidplyr::cluster_copy(cluster, c("manipulate_function")))
+
+##add data to clusters (this takes the longest time)
+system.time(df.party_df <-
+              df %>%
+              ##group by split_by to load data separately
+              dplyr::group_by(split_by) %>%
+              ##partition data across each cluster
+              multidplyr::partition(cluster))
+
+##work with data (for summary make sure data is partitioned and group by the same variable)
+system.time(
+  df.summary <-
+    df.party_df %>%
+    dplyr::select(split_by,x,y,z) %>%
+    dplyr::group_by(split_by) %>%
+    dplyr::summarise(x  = mean(x, na.rm = T),
+                     y = mean(y, na.rm = T),
+                     z = mean(z, na.rm = T))
+)
+
+##return results to local R session (this can also take a lot of time)
+system.time(
+  df.return <-
+    df.summary %>%
+    dplyr::collect() %>%
+    dplyr::arrange(split_by) %>%
+    as.data.frame()
+)
+
+##sequentially
+system.time(
+  df.sequential <-
+    df %>%
+    dplyr::group_by(split_by) %>%
+    dplyr::summarise(x = mean(x, na.rm = T),
+                     y = mean(y, na.rm = T),
+                     z = mean(z, na.rm = T)) %>%
+    as.data.frame()
+)
+
+##identical results?
+identical(
+  df.sequential %>% dplyr::arrange(split_by),
+  df.return %>% dplyr::arrange(split_by)
+)
+all.equal(
+  df.sequential %>% dplyr::arrange(split_by),
+  df.return %>% dplyr::arrange(split_by)
+)
+df.sequential
+df.return
+
+```
+
+```{r echo=TRUE}
+##close cluster
+rm(cluster)
+gc()
+
+##clean environment
+rm(list = ls())
+gc()
+```
+
+#### 6.4.2 Option 2 with `multidplyr`: Loading from File to Clusters
+
+This is similar to the previous method for multidplyr, but sometimes it can be faster to load the data directly into the clusters rather than move them from one R environment to another. Instead of loading and partitioning the data, we will load the 10 files on disk directly into a partitioned dataframe. This prevents the need to duplicate the R environment and reduces memory consumption.
+
+We will create 10 clusters and load 'vroom' and 'tidyverse'.
+
+```{r include=FALSE}
+cluster <- multidplyr::new_cluster(10)
+multidplyr::cluster_library(cluster, c("vroom","tidyverse"))
+```
+
+Find all the files and separate them evenly (nearly) across all clusters.
+
+```{r include=FALSE}
+multidplyr::cluster_assign_partition(cluster, files = dir(path = paste0(getwd(),"/Random Data"), pattern = "csv",full.names = TRUE))
+```
+
+Use `party_df()` to create a partitioned dataframe. This can be quite expensive for large data. You may notice the video or screen glitching. It is obviously best to set up the cluster/nodes/workers on a separate machine to prevent crashes or other computer issues.
+
+```{r echo=TRUE}
+##Load files into clusters
+multidplyr::cluster_send(cluster,
+                         df <- vroom::vroom(
+                           files,
+                           num_threads = parallel::detectCores(),
+                           col_types = c(
+                             rowid = readr::col_double(),
+                             strata = readr::col_character(),
+                             factors = readr::col_character(),
+                             price = readr::col_double(),
+                             y = readr::col_double(),
+                             z = readr::col_double(),
+                             x = readr::col_double()
+                           )
+                         ))
+
+##create a partitioned data frame
+df.party <- party_df(cluster, "df")
+
+system.time(
+  df.summary <-
+    df.party %>%
+    dplyr::select(strata, factors, x, y, z) %>%
+    dplyr::group_by(strata, factors) %>%
+    dplyr::summarise(
+      x  = mean(x, na.rm = T),
+      y = mean(y, na.rm = T),
+      z = mean(z, na.rm = T)
+    )
+)
+
+##return results to local R session (this can also take a lot of time)
+system.time(
+  df.return <-
+    df.summary %>%
+    dplyr::collect() %>%
+    dplyr::arrange(strata, factors) %>%
+    as.data.frame()
+)
+
+##sequentially
+system.time(
+  df.sequential <-
+    vroom::vroom(
+      dir(
+        paste0(getwd(), "/Random Data"),
+        pattern = "csv",
+        full.names = T
+      ),
+      num_threads = parallel::detectCores(),
+      col_types = c(
+        rowid = readr::col_double(),
+        strata = readr::col_character(),
+        factors = readr::col_character(),
+        price = readr::col_double(),
+        y = readr::col_double(),
+        z = readr::col_double(),
+        x = readr::col_double()
+      )
+    ) %>%
+    dplyr::group_by(strata, factors) %>%
+    dplyr::summarise(
+      x = mean(x, na.rm = T),
+      y = mean(y, na.rm = T),
+      z = mean(z, na.rm = T)
+    ) %>%
+    as.data.frame()
+)
+
+##identical results?
+identical(
+  df.sequential %>% dplyr::arrange(strata, factors),
+  df.return %>% dplyr::arrange(strata, factors)
+)
+all.equal(
+  df.sequential %>% dplyr::arrange(strata, factors),
+  df.return %>% dplyr::arrange(strata, factors)
+)
+df.sequential
+df.return
+##close cluster
+rm(cluster)
+gc()
+```
+
+Clean up environment.
+
+```{r echo=TRUE}
+##clean environment
+rm(list = ls())
+gc()
+```
+
+## 7. Use Cases with `multidplyr`
+
+### 7.1 `dplyr` verbs with with `multidplyr`
+
+You can use other `dplyr` verbs and operations with `multidplyr`.
+
+```{r echo=TRUE}
+
+##change this number to a smaller number if you don't have 32GB RAM.
+size <- 100
+set.seed(7)
+
+##Create a data frame
+df1 <- data.frame(
+  factor1   = factor(rep(1:1000, each = size)),
+  factor2     = factor(rep(1:10, each = size)),
+  factor3     = factor(rep(1:10, each = size)),
+  price = runif(size, min = -10, max = 125),
+  y     = runif(size, min = 0, max = 2500),
+  z     = runif(size, min = -10, max = 25),
+  x     = runif(size, min = 0, max = 5000)
+) %>%
+  ##we'll use a rowid to check the results serial vs parallel processing
+  tibble::rowid_to_column("rowid")  %>%
+  ##use group_by to make sure all of the data within groups are exported to the same clusters
+  dplyr::group_by(factor1,factor2) 
+
+##Create a second data frame
+df2 <- data.frame(
+  factor1   = factor(rep(1:1000, each = size)),
+  factor2     = factor(rep(1:10, each = size)),
+  factor3     = factor(rep(1:10, each = size)),
+  price = runif(size, min = -10, max = 125),
+  y     = runif(size, min = 0, max = 2500),
+  z     = runif(size, min = -10, max = 25),
+  x     = runif(size, min = 0, max = 5000)
+) %>%
+  ##we'll use a rowid to check the results serial vs parallel processing
+  tibble::rowid_to_column("rowid")  %>%
+  ##use group_by to make sure all of the data within groups are exported to the same clusters
+  dplyr::group_by(factor1,factor2)
+
+##Joining Data Sequentially (Serially)
+system.time(df3 <- 
+  dplyr::inner_join(
+    df1,
+    df2,
+    by = c("factor1","factor2")
+  ) 
+  )
+
+##Start Cluster
+system.time(cluster <- multidplyr::new_cluster(4))
+
+##Partition the data on to clusters
+system.time(df1.partition <- df1 %>% multidplyr::partition(cluster))
+system.time(df2.partition <- df2 %>% multidplyr::partition(cluster))
+
+##Join the data in clusters
+system.time(
+  df3.partition <- 
+  dplyr::inner_join(
+    df1.partition,
+    df2.partition,
+    by = c("factor1","factor2")
+  ) %>%
+  ##Collect results (call `collect` in this operation to get the same results compared to a serial operation)
+  dplyr::collect())
+
+##Compare results after sorting by rowid
+identical(df3.partition %>% dplyr::arrange(rowid.x, rowid.y), 
+          df3 %>% dplyr::arrange(rowid.x, rowid.y))
+all.equal(df3.partition %>% dplyr::arrange(rowid.x, rowid.y), 
+          df3 %>% dplyr::arrange(rowid.x, rowid.y))
+
+##close cluster
+rm(cluster)
+gc()
+
+##clean environment
+rm(list = ls())
+gc()
+```
+
+### 7.2 Fitting a Model with `multidplyr`
+
+First, let's see how long a sequential modeling step takes.
+
+```{r echo=TRUE}
+#load data
+system.time(
+    by_strata <- 
+     vroom::vroom(
+      dir(
+        paste0(getwd(), "/Random Data"),
+        pattern = "csv",
+        full.names = T
+      ),
+      num_threads = parallel::detectCores(),
+      col_types = c(
+        rowid = readr::col_double(),
+        strata = readr::col_character(),
+        factors = readr::col_character(),
+        price = readr::col_double(),
+        y = readr::col_double(),
+        z = readr::col_double(),
+        x = readr::col_double()
+      )
+    ) %>%
+      ##group by strata since we will be fitting a model separately by each strata
+      dplyr::group_by(strata))
+  
+#fit a simple linear model -- locally (sequential)
+system.time(
+  lm.sequential <- 
+    by_strata %>%
+    do(mod = lm(price ~ x + y + z, data = .))
+  )
+
+##retrieve results
+system.time(lm.sequential.list <- lm.sequential$mod)
+```
+
+Next, let's use a parallel approach. This can also be done using multidplyr after partitioning the data by groups on to each clusters, but I haven't gotten it to work.
+
+```{r echo=TRUE}
+##Set the options to allow more than the default size of object to be exported.
+options(future.globals.maxSize= 12000*1024^2 )
+
+##furrr -- Create clusters
+future::plan(list(future::tweak(future::multisession, workers = 10)))
+future::nbrOfWorkers()
+
+##furrr -- Use `split` and `future_map` from `furrr`.
+system.time(
+  lm.future <- 
+  by_strata %>%
+  split(.$strata) %>%
+  furrr::future_map(~ lm(price ~ x + y + z, data = .x)))
+
+##furrr -- Close cluster
+future::plan("sequential")
+future::nbrOfWorkers()
+
+```
+
+Compare results.
+
+```{r echo=TRUE}
+all.equal(lm.sequential.list[[1]][["coefficients"]],lm.future[["1"]][["coefficients"]])
+all.equal(lm.sequential.list[[1]][["fitted.values"]],lm.future[["1"]][["fitted.values"]])
+all.equal(lm.sequential.list[[1]][["residuals"]],lm.future[["1"]][["residuals"]])
+```
+
+## 8. Clean Up R Environment
+
+Clean up environment and delete temp files Clean up environment.
+
+```{r echo=FALSE}
+rm(list=ls())
+gc()
+```
+
+Remove Random Data
+
+```{r echo=FALSE}
+unlink(paste0(getwd(),"/Random Data"), recursive = T)
+```
